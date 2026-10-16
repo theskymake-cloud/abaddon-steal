@@ -1,0 +1,1765 @@
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local RS = game:GetService("ReplicatedStorage")
+local CollectionService = game:GetService("CollectionService")
+local Lighting = game:GetService("Lighting")
+local LP = Players.LocalPlayer
+
+if _G.AbaddonCleanup then pcall(_G.AbaddonCleanup) end
+local Conns, Cleanups = {}, {}
+local function track(c) Conns[#Conns + 1] = c return c end
+local function onCleanup(f) Cleanups[#Cleanups + 1] = f end
+_G.AbaddonCleanup = function()
+    for _, c in ipairs(Conns) do pcall(function() c:Disconnect() end) end
+    for _, f in ipairs(Cleanups) do pcall(f) end
+    Conns, Cleanups = {}, {}
+    if _G.AbaddonGui then pcall(function() _G.AbaddonGui:Destroy() end) end
+end
+
+local function rgb(r, g, b) return Color3.fromRGB(r, g, b) end
+local KEY_TOGGLE = Enum.KeyCode.RightShift
+local C = {
+    Black = rgb(0, 0, 0), White = rgb(255, 255, 255),
+    Outer = rgb(24, 24, 24), Bg = rgb(12, 12, 12), Side = rgb(8, 8, 8),
+    Field = rgb(26, 26, 26), FieldHov = rgb(38, 38, 38), Off = rgb(36, 36, 36),
+    Border = rgb(46, 46, 46), Text = rgb(200, 200, 200), TextDim = rgb(120, 120, 120),
+    TextFaint = rgb(70, 70, 70), Accent = rgb(235, 235, 235),
+}
+local SURV_COL = rgb(120, 255, 150)
+local ENT_COL  = rgb(255, 70, 60)
+local SECRET_COL = rgb(0, 255, 230)   -- бирюзовый, не совпадает ни с одной редкостью
+local RunService = game:GetService("RunService")
+
+-- ==================== TOP-N ДОРОГИХ ====================
+-- предметы дороже этого порога или входящие в топ-N получают яркий highlight
+local TOP_N     = 5      -- сколько самых дорогих светятся
+local TOP_MULT  = 1.2    -- множитель яркости цвета для топ-предметов
+-- иконки редкостей
+local RAR_ICON = {
+    Common    = "○",
+    Uncommon  = "◇",
+    Rare      = "◈",
+    Mythic    = "✦",
+    Legendary = "★",
+    Secret    = "◉",
+}
+
+local State = {
+    LootESP       = false,
+    LootRange     = 700,
+    LootOutline   = true,
+    TopHighlight  = true,   -- подсвечивать топ-N самых дорогих
+    TopN          = 5,      -- сколько топов подсвечивать
+    ShowKgRate    = false,   -- показывать $/kg
+    SurvESP       = false,
+    SurvRange     = 3000,
+    EntESP        = false,
+    EntRange      = 3000,
+    CharOutline   = true,
+    InfStamina    = false,
+    SpeedOverride = false,
+    AdminSpeed    = 40,
+    RoundHUD      = false,
+    AutoCollect = false, CollectMinRarity = "Mythic", CollectMethod = "Prompt (hold)",
+    CollectRange = 18, CollectDelay = 250, NoSlowdown = false, InstantCollect = false,
+}
+
+local function parentGui()
+    if gethui then local ok, h = pcall(gethui) if ok and h then return h end end
+    local ok, cg = pcall(function() return game:GetService("CoreGui") end)
+    if ok and cg then return cg end
+    return LP:WaitForChild("PlayerGui")
+end
+
+local function new(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props) do o[k] = v end
+    if parent then o.Parent = parent end
+    return o
+end
+local function stroke(p, col)
+    return new("UIStroke", { Color = col or C.Black, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, p)
+end
+local function gloss(p, b)
+    return new("UIGradient", { Rotation = 90, Color = ColorSequence.new(C.White, b or rgb(130, 130, 130)) }, p)
+end
+local function tween(o, t, props)
+    TweenService:Create(o, TweenInfo.new(t, Enum.EasingStyle.Quart), props):Play()
+end
+local FONT = Enum.Font.Code
+local orderN = 0
+local function O() orderN += 1 return orderN end
+
+local ScreenGui = new("ScreenGui", {
+    Name = "AbaddonUI", ResetOnSpawn = false, IgnoreGuiInset = true,
+    DisplayOrder = 2147483647, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, parentGui())
+_G.AbaddonGui = ScreenGui
+
+-- ==================== TOAST ====================
+local Toasts = new("Frame", {
+    Size = UDim2.fromOffset(340, 300), Position = UDim2.fromOffset(10, 10),
+    BackgroundTransparency = 1, ZIndex = 400,
+}, ScreenGui)
+new("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, Toasts)
+local function log(text, col)
+    col = col or C.Text
+    local f = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 20), BackgroundColor3 = C.Bg,
+        BorderSizePixel = 0, LayoutOrder = O(), ZIndex = 401,
+    }, Toasts)
+    stroke(f, C.Black)
+    -- цветная полоска слева = тип лога
+    new("Frame", { Size = UDim2.new(0, 2, 1, 0), BackgroundColor3 = col, BorderSizePixel = 0, ZIndex = 402 }, f)
+    new("TextLabel", {
+        Size = UDim2.new(1, -14, 1, 0), Position = UDim2.fromOffset(10, 0),
+        BackgroundTransparency = 1, Text = text,
+        TextColor3 = col, TextSize = 11, Font = FONT,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 402,
+    }, f)
+    task.delay(4, function() if f.Parent then f:Destroy() end end)
+end
+local function logOk(t)   log(t, rgb(140, 220, 100)) end
+local function logWarn(t) log(t, rgb(220, 175, 80))  end
+local function logErr(t)  log(t, rgb(220, 80, 80))   end
+
+-- ==================== PANEL ====================
+local Overlay = new("Frame", {
+    Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.Black,
+    BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false, ZIndex = 10,
+}, ScreenGui)
+local PW, PH, SB = 640, 440, 130
+
+local Panel = new("CanvasGroup", {
+    Size = UDim2.fromOffset(PW, PH),
+    Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
+    BackgroundColor3 = C.Outer, BorderSizePixel = 0,
+    Visible = false, Active = true, ZIndex = 100, GroupTransparency = 1,
+}, ScreenGui)
+stroke(Panel, C.Black)
+
+local Body = new("Frame", {
+    Position = UDim2.fromOffset(5, 5), Size = UDim2.new(1, -10, 1, -10),
+    BackgroundColor3 = C.Bg, BorderSizePixel = 0, ZIndex = 2,
+}, Panel)
+stroke(Body, C.Black)
+
+-- радужная полоска сверху
+local top = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 2), BackgroundColor3 = C.White,
+    BorderSizePixel = 0, ZIndex = 10,
+}, Body)
+new("UIGradient", {
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0,   rgb(60, 60, 60)),
+        ColorSequenceKeypoint.new(0.5, C.White),
+        ColorSequenceKeypoint.new(1,   rgb(60, 60, 60)),
+    }),
+}, top)
+
+local TopBar = new("Frame", {
+    Position = UDim2.fromOffset(0, 2), Size = UDim2.new(1, 0, 0, 26),
+    BackgroundTransparency = 1, Active = true, ZIndex = 5,
+}, Body)
+new("TextLabel", {
+    Size = UDim2.fromOffset(70, 26), Position = UDim2.fromOffset(10, 0),
+    BackgroundTransparency = 1, RichText = true,
+    Text = '<font color="rgb(255,255,255)">ab</font><font color="rgb(110,110,110)">addon</font>',
+    TextSize = 15, Font = FONT, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6,
+}, TopBar)
+new("TextLabel", {
+    Size = UDim2.fromOffset(60, 26), Position = UDim2.fromOffset(84, 1),
+    BackgroundTransparency = 1, Text = "by ellie",
+    TextColor3 = C.TextFaint, TextSize = 10, Font = FONT,
+    TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6,
+}, TopBar)
+local CloseBtn = new("TextButton", {
+    Size = UDim2.fromOffset(20, 18), Position = UDim2.new(1, -28, 0, 4),
+    BackgroundColor3 = C.Field, Text = "x",
+    TextColor3 = C.TextDim, TextSize = 12, Font = FONT,
+    AutoButtonColor = false, BorderSizePixel = 0, ZIndex = 8,
+}, TopBar)
+stroke(CloseBtn, C.Black) gloss(CloseBtn)
+CloseBtn.MouseEnter:Connect(function() tween(CloseBtn, 0.1, { TextColor3 = C.White, BackgroundColor3 = C.FieldHov }) end)
+CloseBtn.MouseLeave:Connect(function() tween(CloseBtn, 0.1, { TextColor3 = C.TextDim, BackgroundColor3 = C.Field }) end)
+
+new("Frame", { Position = UDim2.fromOffset(0, 28), Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = C.Black,  BorderSizePixel = 0, ZIndex = 3 }, Body)
+new("Frame", { Position = UDim2.fromOffset(0, 29), Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = C.Border, BorderSizePixel = 0, ZIndex = 3 }, Body)
+
+local Sidebar = new("Frame", {
+    Size = UDim2.new(0, SB, 1, -30), Position = UDim2.fromOffset(0, 30),
+    BackgroundColor3 = C.Side, BorderSizePixel = 0, ZIndex = 2,
+}, Body)
+new("Frame", { Position = UDim2.new(1, -1, 0, 0), Size = UDim2.new(0, 1, 1, 0), BackgroundColor3 = C.Border, BorderSizePixel = 0, ZIndex = 3 }, Sidebar)
+local TabList = new("Frame", {
+    Size = UDim2.new(1, -14, 1, -64), Position = UDim2.fromOffset(6, 8),
+    BackgroundTransparency = 1, ZIndex = 3,
+}, Sidebar)
+new("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, TabList)
+
+local Card = new("Frame", {
+    Size = UDim2.new(1, -14, 0, 38), Position = UDim2.new(0, 6, 1, -46),
+    BackgroundColor3 = C.Bg, BorderSizePixel = 0, ZIndex = 3,
+}, Sidebar)
+stroke(Card, C.Black)
+local av = new("ImageLabel", {
+    Size = UDim2.fromOffset(28, 28), Position = UDim2.fromOffset(5, 5),
+    BackgroundColor3 = C.Field, BorderSizePixel = 0, ZIndex = 4,
+    Image = "rbxthumb://type=AvatarHeadShot&id=" .. LP.UserId .. "&w=150&h=150",
+    ImageColor3 = rgb(150, 150, 150),
+}, Card)
+stroke(av, C.Black)
+new("TextLabel", {
+    Size = UDim2.new(1, -40, 0, 14), Position = UDim2.fromOffset(38, 4),
+    BackgroundTransparency = 1, Text = "@" .. LP.Name,
+    TextColor3 = C.Text, TextSize = 10, Font = FONT,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4,
+}, Card)
+new("TextLabel", {
+    Size = UDim2.new(1, -40, 0, 12), Position = UDim2.fromOffset(38, 20),
+    BackgroundTransparency = 1, Text = "ACTIVE",
+    TextColor3 = C.TextFaint, TextSize = 9, Font = FONT,
+    TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
+}, Card)
+
+local Content = new("Frame", {
+    Size = UDim2.new(1, -SB, 1, -30), Position = UDim2.fromOffset(SB, 30),
+    BackgroundTransparency = 1, ZIndex = 2,
+}, Body)
+
+-- drag
+do
+    local dragging, ds, sp
+    TopBar.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging, ds, sp = true, i.Position, Panel.Position
+            i.Changed:Connect(function() if i.UserInputState == Enum.UserInputState.End then dragging = false end end)
+        end
+    end)
+    track(UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - ds
+            Panel.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y)
+        end
+    end))
+end
+
+-- ==================== TABS / WIDGETS ====================
+local Tabs, Pages = {}, {}
+local function setTab(name)
+    for n, t in pairs(Tabs) do
+        local a = n == name
+        t.lbl.TextColor3 = a and C.White or C.TextDim
+        t.bar.Visible = a
+        Pages[n].Visible = a
+    end
+end
+local function createTab(name, order)
+    local btn = new("TextButton", {
+        Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, Text = "",
+        AutoButtonColor = false, LayoutOrder = order, ZIndex = 4,
+    }, TabList)
+    local bar = new("Frame", {
+        Size = UDim2.fromOffset(2, 14), Position = UDim2.new(0, 0, 0.5, -7),
+        BackgroundColor3 = C.White, BorderSizePixel = 0, Visible = false, ZIndex = 5,
+    }, btn)
+    local lbl = new("TextLabel", {
+        Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(12, 0),
+        BackgroundTransparency = 1, Text = name:lower(),
+        TextColor3 = C.TextDim, TextSize = 12, Font = FONT,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+    }, btn)
+    btn.MouseEnter:Connect(function() if Pages[name] and Pages[name].Visible then return end tween(lbl, 0.08, { TextColor3 = C.Text }) end)
+    btn.MouseLeave:Connect(function() if Pages[name] and Pages[name].Visible then return end tween(lbl, 0.1, { TextColor3 = C.TextDim }) end)
+    local page = new("ScrollingFrame", {
+        Size = UDim2.new(1, -16, 1, -16), Position = UDim2.fromOffset(8, 8),
+        BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false, ZIndex = 3,
+        ScrollBarThickness = 3, ScrollBarImageColor3 = C.Accent,
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        CanvasSize = UDim2.new(), ElasticBehavior = Enum.ElasticBehavior.Never,
+    }, Content)
+    new("UIListLayout", { Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder }, page)
+    new("UIPadding", { PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 10) }, page)
+    Tabs[name], Pages[name] = { lbl = lbl, bar = bar }, page
+    btn.MouseButton1Click:Connect(function() setTab(name) end)
+    return page
+end
+
+local function section(page, text)
+    local outer = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1, LayoutOrder = O(), ZIndex = 3,
+    }, page)
+    local box = new("Frame", {
+        Position = UDim2.fromOffset(0, 7), Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, ZIndex = 3,
+    }, outer)
+    stroke(box, C.Border)
+    new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, box)
+    new("UIPadding", {
+        PaddingTop = UDim.new(0, 12), PaddingBottom = UDim.new(0, 8),
+        PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
+    }, box)
+    local t = new("TextLabel", {
+        Size = UDim2.fromOffset(0, 14), AutomaticSize = Enum.AutomaticSize.X,
+        Position = UDim2.fromOffset(8, 0), BackgroundColor3 = C.Bg,
+        BorderSizePixel = 0, Text = text:lower(),
+        TextColor3 = C.White, TextSize = 11, Font = FONT, ZIndex = 6,
+    }, outer)
+    new("UIPadding", { PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 4) }, t)
+    return box
+end
+
+local function row(parent, h)
+    return new("Frame", {
+        Size = UDim2.new(1, 0, 0, h), BackgroundTransparency = 1,
+        LayoutOrder = O(), ZIndex = 4,
+    }, parent)
+end
+
+local function toggle(parent, label, key, cb)
+    local r = row(parent, 20)
+    local box = new("Frame", {
+        Size = UDim2.fromOffset(10, 10), Position = UDim2.fromOffset(0, 5),
+        BackgroundColor3 = State[key] and C.Accent or C.Off,
+        BorderSizePixel = 0, ZIndex = 5,
+    }, r)
+    stroke(box, C.Black) gloss(box)
+    local lbl = new("TextLabel", {
+        Size = UDim2.new(1, -20, 1, 0), Position = UDim2.fromOffset(18, 0),
+        BackgroundTransparency = 1, Text = label,
+        TextColor3 = C.Text, TextSize = 11, Font = FONT,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
+    }, r)
+    local hit = new("TextButton", {
+        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+        Text = "", ZIndex = 6,
+    }, r)
+    hit.MouseEnter:Connect(function() tween(lbl, 0.08, { TextColor3 = C.White }) end)
+    hit.MouseLeave:Connect(function() tween(lbl, 0.1, { TextColor3 = C.Text }) end)
+    hit.MouseButton1Click:Connect(function()
+        State[key] = not State[key]
+        tween(box, 0.1, { BackgroundColor3 = State[key] and C.Accent or C.Off })
+        if cb then cb(State[key]) end
+    end)
+    return box -- возвращаем для внешнего обновления если нужно
+end
+
+local function slider(parent, label, min, max, key, cb)
+    local r = row(parent, 32)
+    new("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
+        Text = label, TextColor3 = C.Text, TextSize = 11, Font = FONT,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
+    }, r)
+    local tr = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 10), Position = UDim2.fromOffset(0, 18),
+        BackgroundColor3 = C.Field, BorderSizePixel = 0, ZIndex = 4,
+    }, r)
+    stroke(tr, C.Black)
+    local fill = new("Frame", {
+        Size = UDim2.fromScale((State[key] - min) / (max - min), 1),
+        BackgroundColor3 = C.Accent, BorderSizePixel = 0, ZIndex = 5,
+    }, tr)
+    gloss(fill)
+    local val = new("TextLabel", {
+        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+        Text = tostring(State[key]), TextColor3 = C.White, TextSize = 10,
+        Font = FONT, TextStrokeTransparency = 0.3, ZIndex = 7,
+    }, tr)
+    local dragging = false
+    local function setX(x)
+        local rel = math.clamp((x - tr.AbsolutePosition.X) / math.max(1, tr.AbsoluteSize.X), 0, 1)
+        local v = math.floor(min + (max - min) * rel + 0.5)
+        State[key] = v
+        fill.Size = UDim2.fromScale((v - min) / (max - min), 1)
+        val.Text = tostring(v)
+        if cb then cb(v) end
+    end
+    local hit = new("TextButton", {
+        Size = UDim2.new(1, 0, 0, 22), Position = UDim2.fromOffset(0, 14),
+        BackgroundTransparency = 1, Text = "", ZIndex = 8,
+    }, r)
+    hit.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = true setX(i.Position.X)
+        end
+    end)
+    track(UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            setX(i.Position.X)
+        end
+    end))
+    track(UIS.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end))
+end
+
+local function button(parent, label, cb, danger)
+    local r = row(parent, 22)
+    local b = new("TextButton", {
+        Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.Field,
+        Text = label, TextColor3 = danger and rgb(220, 80, 80) or C.TextDim,
+        TextSize = 11, Font = FONT, AutoButtonColor = false, BorderSizePixel = 0, ZIndex = 6,
+    }, r)
+    stroke(b, C.Black) gloss(b, rgb(170, 170, 170))
+    b.MouseEnter:Connect(function()
+        tween(b, 0.1, { BackgroundColor3 = C.FieldHov, TextColor3 = danger and rgb(255, 100, 100) or C.White })
+    end)
+    b.MouseLeave:Connect(function()
+        tween(b, 0.12, { BackgroundColor3 = C.Field, TextColor3 = danger and rgb(220, 80, 80) or C.TextDim })
+    end)
+    b.MouseButton1Click:Connect(cb)
+end
+
+local function info(parent, text, h)
+    local r = row(parent, h or 30)
+    return new("TextLabel", {
+        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+        Text = text, TextColor3 = C.TextDim, TextSize = 10, Font = FONT,
+        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 4,
+    }, r)
+end
+
+local closeOpenDD
+local function dropdown(parent, label, options, key, cb)
+    local r = row(parent, 22)
+    r.ClipsDescendants = true
+    new("TextLabel", {
+        Size = UDim2.new(1, -118, 0, 22), BackgroundTransparency = 1, Text = label,
+        TextColor3 = C.Text, TextSize = 11, Font = FONT,
+        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4,
+    }, r)
+
+    local idx = table.find(options, State[key]) or 1
+    State[key] = options[idx]
+
+    local btn = new("TextButton", {
+        Size = UDim2.fromOffset(112, 18), Position = UDim2.new(1, -112, 0, 2),
+        BackgroundColor3 = C.Field, Text = options[idx], TextColor3 = C.Accent,
+        TextSize = 10, Font = FONT, TextXAlignment = Enum.TextXAlignment.Left,
+        AutoButtonColor = false, BorderSizePixel = 0, ZIndex = 6,
+    }, r)
+    new("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 16) }, btn)
+    stroke(btn, C.Black) gloss(btn, rgb(170, 170, 170))
+    local arrow = new("TextLabel", {
+        Size = UDim2.fromOffset(14, 18), Position = UDim2.new(1, -14, 0, 2), BackgroundTransparency = 1,
+        Text = "v", TextColor3 = C.TextDim, TextSize = 9, Font = FONT, ZIndex = 7,
+    }, r)
+
+    local H = #options * 18
+    local list = new("Frame", {
+        Size = UDim2.fromOffset(112, H), Position = UDim2.new(1, -112, 0, 24),
+        BackgroundColor3 = rgb(10, 10, 10), BackgroundTransparency = 0.12,
+        BorderSizePixel = 0, Visible = false, ZIndex = 9,
+    }, r)
+    stroke(list, C.Border)
+
+    local optBtns = {}
+    local function paint()
+        for i, b in ipairs(optBtns) do b.TextColor3 = (i == idx) and C.Accent or C.TextDim end
+    end
+
+    local isOpen = false
+    local function close()
+        if not isOpen then return end
+        isOpen = false
+        arrow.Text = "v"
+        tween(r, 0.12, { Size = UDim2.new(1, 0, 0, 22) })
+        task.delay(0.13, function() if not isOpen then list.Visible = false end end)
+    end
+    local function open()
+        if closeOpenDD and closeOpenDD ~= close then closeOpenDD() end
+        closeOpenDD = close
+        isOpen = true
+        arrow.Text = "^"
+        list.Visible = true
+        tween(r, 0.15, { Size = UDim2.new(1, 0, 0, 24 + H + 2) })
+    end
+
+    for i, o in ipairs(options) do
+        local b = new("TextButton", {
+            Size = UDim2.new(1, 0, 0, 18), Position = UDim2.fromOffset(0, (i - 1) * 18),
+            BackgroundColor3 = C.FieldHov, BackgroundTransparency = 1, Text = o, TextColor3 = C.TextDim,
+            TextSize = 10, Font = FONT, TextXAlignment = Enum.TextXAlignment.Left,
+            AutoButtonColor = false, BorderSizePixel = 0, ZIndex = 10,
+        }, list)
+        new("UIPadding", { PaddingLeft = UDim.new(0, 6) }, b)
+        b.MouseEnter:Connect(function() b.BackgroundTransparency = 0.4 end)
+        b.MouseLeave:Connect(function() b.BackgroundTransparency = 1 end)
+        b.MouseButton1Click:Connect(function()
+            idx = i
+            State[key] = options[i]
+            btn.Text = options[i]
+            paint()
+            close()
+            if cb then cb(options[i]) end
+        end)
+        optBtns[i] = b
+    end
+    paint()
+    btn.MouseButton1Click:Connect(function() if isOpen then close() else open() end end)
+end
+
+local MainPage, EspPage, SetPage = createTab("Main", 1), createTab("ESP", 2), createTab("Settings", 3)
+setTab("Main")
+
+-- ==================== GAME CONFIG ====================
+local GC
+local RAR, RAR_LIST = {}, {}
+local ITEM_BY_KEY, ITEM_BY_DISPLAY = {}, {}
+local FALLBACK = {
+    Common    = rgb(190, 190, 190),
+    Uncommon  = rgb(90,  210, 100),
+    Rare      = rgb(160, 100, 255),
+    Mythic    = rgb(230, 60,  60),
+    Legendary = rgb(245, 175, 40),
+    Secret    = SECRET_COL,
+}
+local RAR_ORDER = { Common = 1, Uncommon = 2, Rare = 3, Mythic = 4, Legendary = 5, Secret = 6 }
+
+local function brighten(c)
+    local h, s, v = c:ToHSV()
+    if v < 0.55 then return Color3.fromHSV(h, s * 0.6, 0.9) end
+    return c
+end
+local function brightenMore(c)
+    -- для топ предметов: увеличиваем яркость и насыщенность
+    local h, s, v = c:ToHSV()
+    return Color3.fromHSV(h, math.min(1, s * 0.7 + 0.1), math.min(1, v * 0.8 + 0.35))
+end
+
+local function loadConfig()
+    RAR, RAR_LIST, ITEM_BY_KEY, ITEM_BY_DISPLAY = {}, {}, {}, {}
+    local m = RS:FindFirstChild("GameConfig") or RS:WaitForChild("GameConfig", 5)
+    if m then
+        local ok, cfg = pcall(require, m)
+        if ok and type(cfg) == "table" then
+            GC = cfg
+            if type(cfg.Rarities) == "table" then
+                for i, r in ipairs(cfg.Rarities) do
+                    if type(r) == "table" and r.name then
+                        RAR[r.name] = typeof(r.colour) == "Color3" and brighten(r.colour) or FALLBACK[r.name] or C.White
+                        RAR_LIST[i] = r.name
+                    end
+                end
+            end
+            if type(cfg.Items) == "table" then
+                for k, d in pairs(cfg.Items) do
+                    ITEM_BY_KEY[k] = d
+                    if type(d) == "table" and d.displayName then ITEM_BY_DISPLAY[d.displayName] = d end
+                end
+            end
+        end
+    end
+    for name in pairs(RAR) do
+        if name:lower() == "secret" then RAR[name] = SECRET_COL end
+    end
+    for n, c in pairs(FALLBACK) do RAR[n] = RAR[n] or c end
+end
+
+-- ==================== LOOT SCAN ====================
+local tmpl = {}
+local function collectTemplates(inst)
+    for _, c in ipairs(inst:GetChildren()) do
+        if c:IsA("Folder") then collectTemplates(c)
+        elseif c:IsA("Model") or c:IsA("Tool") or c:IsA("BasePart") then tmpl[c.Name] = c end
+    end
+end
+local function loadTemplates()
+    tmpl = {}
+    local lt = RS:FindFirstChild("LootTemplates")
+    if lt then collectTemplates(lt) end
+end
+
+local WEIGHT = { "weight", "kg", "mass" }
+local VALUE  = { "value", "price", "cost", "worth", "sell" }
+local function nameHas(n, list)
+    n = n:lower()
+    for _, w in ipairs(list) do if n:find(w, 1, true) then return true end end
+    return false
+end
+local function readStat(inst, list)
+    if not inst then return nil end
+    for k, v in pairs(inst:GetAttributes()) do
+        if type(v) == "number" and nameHas(k, list) then return v end
+    end
+    for _, c in ipairs(inst:GetChildren()) do
+        if (c:IsA("NumberValue") or c:IsA("IntValue")) and nameHas(c.Name, list) then return c.Value end
+    end
+    for _, c in ipairs(inst:GetChildren()) do
+        if c:IsA("Configuration") or c:IsA("Folder") then
+            local r = readStat(c, list)
+            if r then return r end
+        end
+    end
+    return nil
+end
+local function statFromTable(t, list)
+    if type(t) ~= "table" then return nil end
+    for k, v in pairs(t) do
+        if type(k) == "string" and type(v) == "number" and nameHas(k, list) then return v end
+    end
+    return nil
+end
+
+local function rarityFrom(v, allowNum)
+    if type(v) == "string" then
+        local l = v:lower()
+        for name in pairs(RAR) do if name:lower() == l then return name end end
+    elseif allowNum and type(v) == "number" and RAR_LIST[v] then
+        return RAR_LIST[v]
+    end
+    return nil
+end
+local function readRarity(inst)
+    for k, v in pairs(inst:GetAttributes()) do
+        if k:lower():find("rarity", 1, true) then
+            local r = rarityFrom(v, true) if r then return r end
+        end
+    end
+    for _, c in ipairs(inst:GetChildren()) do
+        if c:IsA("ValueBase") and c.Name:lower():find("rarity", 1, true) then
+            local r = rarityFrom(c.Value, true) if r then return r end
+        end
+    end
+    for _, v in pairs(inst:GetAttributes()) do
+        if type(v) == "string" then
+            local r = rarityFrom(v, false) if r then return r end
+        end
+    end
+    local a = inst.Parent
+    while a and a ~= workspace do
+        local r = rarityFrom(a.Name, false) if r then return r end
+        a = a.Parent
+    end
+    return nil
+end
+
+local function partOf(o)
+    if o:IsA("BasePart") then return o end
+    if o:IsA("Tool")  then return o:FindFirstChild("Handle") or o:FindFirstChildWhichIsA("BasePart", true) end
+    if o:IsA("Model") then return o.PrimaryPart or o:FindFirstChildWhichIsA("BasePart", true) end
+end
+local function inPlayer(o)
+    local a = o.Parent
+    while a and a ~= workspace do
+        if a:IsA("Model") and Players:GetPlayerFromCharacter(a) then return true end
+        a = a.Parent
+    end
+    return false
+end
+local function resolveTemplate(name)
+    if tmpl[name] then return tmpl[name], name end
+    local base = name:gsub("%s*%(?%d+%)?$", "")
+    if tmpl[base] then return tmpl[base], base end
+    return nil
+end
+
+local function commas(n)
+    local s = tostring(math.floor((tonumber(n) or 0) + 0.5))
+    return (s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", ""))
+end
+
+local lootList, lastScan = {}, 0
+local LOOT_CLASS = { Model = true, Tool = true, Part = true, MeshPart = true, UnionOperation = true, WedgePart = true }
+
+local function scanLoot()
+    if next(tmpl) == nil then loadTemplates() end
+    local out, matched = {}, {}
+    local all = workspace:GetDescendants()
+    local t0 = os.clock()
+    for i = 1, #all do
+        local o = all[i]
+        if LOOT_CLASS[o.ClassName] then
+            local nm = o.Name
+            local t, tname = tmpl[nm], nm
+            if not t and nm:find("[%d%)]$") then t, tname = resolveTemplate(nm) end
+            if t and not inPlayer(o) then
+                local skip, a = false, o.Parent
+                while a and a ~= workspace do
+                    if matched[a] then skip = true break end
+                    a = a.Parent
+                end
+                if not skip then
+                    matched[o] = true
+                    local p = partOf(o)
+                    if p then
+                        local def = ITEM_BY_KEY[tname] or ITEM_BY_DISPLAY[tname]
+                        local kg   = readStat(o, WEIGHT) or readStat(t, WEIGHT) or statFromTable(def, WEIGHT)
+                        local cost = readStat(o, VALUE)  or readStat(t, VALUE)  or statFromTable(def, VALUE)
+                        if kg and cost then
+                            out[#out + 1] = {
+                                inst = o, part = p, kg = kg, cost = cost,
+                                name = (type(def) == "table" and def.displayName) or o.Name,
+                                rarity = readRarity(o),
+                            }
+                        end
+                    end
+                end
+            end
+        end
+        if i % 500 == 0 and os.clock() - t0 > 0.004 then
+            task.wait()
+            t0 = os.clock()
+        end
+    end
+    lootList = out
+end
+
+local scanningLoot = false
+local function scanLootAsync()
+    if scanningLoot then return end
+    scanningLoot = true
+    task.spawn(function()
+        pcall(scanLoot)
+        scanningLoot = false
+    end)
+end
+
+-- дамп-инструменты
+local function dumpTemplates()
+    loadTemplates()
+    local out, n = {}, 0
+    for name, t in pairs(tmpl) do
+        n += 1 if n > 12 then break end
+        out[#out + 1] = name .. " [" .. t.ClassName .. "]"
+        for k, v in pairs(t:GetAttributes()) do out[#out + 1] = "  attr " .. k .. " = " .. tostring(v) end
+        for _, c in ipairs(t:GetChildren()) do
+            out[#out + 1] = "  " .. c.Name .. " [" .. c.ClassName .. "]" .. (c:IsA("ValueBase") and (" = " .. tostring(c.Value)) or "")
+        end
+    end
+    print("[Abaddon] LootTemplates:\n" .. table.concat(out, "\n"))
+    log("Templates dumped to F9")
+end
+local function dumpConfig()
+    local out = {}
+    if not GC then log("GameConfig not loaded") return end
+    if type(GC.Rarities) == "table" then
+        for i, r in ipairs(GC.Rarities) do
+            out[#out + 1] = "rarity " .. i .. ": " .. tostring(r.name) .. " " .. tostring(r.colour)
+        end
+    end
+    local n = 0
+    for k, d in pairs(GC.Items or {}) do
+        n += 1 if n > 8 then break end
+        out[#out + 1] = "item " .. tostring(k)
+        if type(d) == "table" then
+            for kk, vv in pairs(d) do out[#out + 1] = "  " .. tostring(kk) .. " = " .. tostring(vv) end
+        end
+    end
+    print("[Abaddon] GameConfig:\n" .. table.concat(out, "\n"))
+    log("GameConfig dumped to F9")
+end
+local function dumpNearestLoot()
+    if next(tmpl) == nil then loadTemplates() end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local best, bd
+    for _, o in ipairs(workspace:GetDescendants()) do
+        if (o:IsA("Model") or o:IsA("Tool") or o:IsA("BasePart")) and resolveTemplate(o.Name) and not inPlayer(o) then
+            local p = partOf(o)
+            if p then
+                local d = (p.Position - cam.CFrame.Position).Magnitude
+                if not bd or d < bd then best, bd = o, d end
+            end
+        end
+    end
+    if not best then log("No loot found") return end
+    local out = { best:GetFullName() .. " [" .. best.ClassName .. "] " .. math.floor(bd) .. "m" }
+    for k, v in pairs(best:GetAttributes()) do out[#out + 1] = "  attr " .. k .. " = " .. tostring(v) end
+    for _, c in ipairs(best:GetDescendants()) do
+        local extra = c:IsA("ValueBase") and (" = " .. tostring(c.Value)) or ""
+        out[#out + 1] = "  " .. c:GetFullName():sub(#best:GetFullName() + 2) .. " [" .. c.ClassName .. "]" .. extra
+        for k, v in pairs(c:GetAttributes()) do out[#out + 1] = "    attr " .. k .. " = " .. tostring(v) end
+    end
+    print("[Abaddon] nearest loot:\n" .. table.concat(out, "\n"))
+    log("Nearest loot dumped to F9")
+end
+
+-- ==================== ESP РЕНДЕР ====================
+local lootEsp, survEsp, entEsp = {}, {}, {}
+
+local function drop(tbl, k)
+    local e = tbl[k]
+    if not e then return end
+    tbl[k] = nil
+    pcall(function() e.bb:Destroy() end)
+    if e.ol    then pcall(function() e.ol:Destroy()    end) end
+    if e.light then pcall(function() e.light:Destroy() end) end
+end
+
+-- HL лимит Roblox ~31 одновременно
+local HL_MAX = 30
+
+-- kind: "hl" (Highlight, лимит ~31) | "box" (SelectionBox, без лимита) | nil
+local function put(tbl, key, adornee, text, col, outlineTarget, kind, fill, secret)
+    local e = tbl[key]
+    if e and (not e.bb.Parent or e.adornee ~= adornee or e.kind ~= kind) then
+        drop(tbl, key) e = nil
+    end
+    if not e then
+        local bb = new("BillboardGui", {
+            Name = "AbaddonESP", Adornee = adornee, AlwaysOnTop = true,
+            Size = secret and UDim2.fromOffset(260, 56) or UDim2.fromOffset(200, 44),
+            StudsOffset = Vector3.new(0, secret and 3.2 or 2.5, 0), ResetOnSpawn = false,
+        }, ScreenGui)
+        local l = new("TextLabel", {
+            Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+            TextSize = secret and 14 or 11, Font = FONT,
+            TextStrokeTransparency = secret and 0 or 0.3,
+            TextStrokeColor3 = secret and rgb(0, 60, 55) or C.Black,
+            TextWrapped = true, ZIndex = 2,
+        }, bb)
+        local ol
+        if kind == "hl" then
+            ol = new("Highlight", {
+                Adornee = outlineTarget,
+                FillTransparency = fill or 1,
+                OutlineTransparency = 0,
+                DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+            }, ScreenGui)
+        elseif kind == "box" then
+            ol = new("SelectionBox", {
+                Adornee = outlineTarget,
+                LineThickness = secret and 0.06 or 0.03,
+                SurfaceTransparency = 1,
+            }, ScreenGui)
+        end
+        local light
+        if secret and adornee:IsA("BasePart") then
+            light = new("PointLight", { Color = SECRET_COL, Brightness = 3, Range = 16, Shadows = false }, adornee)
+        end
+        e = { bb = bb, lbl = l, ol = ol, light = light, adornee = adornee, kind = kind, secret = secret }
+        tbl[key] = e
+    end
+
+    e.lbl.Text       = text
+    e.lbl.TextColor3 = col
+
+    if e.ol and not e.secret then
+        if e.kind == "hl" then
+            e.ol.OutlineColor = col
+            e.ol.FillColor    = col
+        else
+            e.ol.Color3 = col
+        end
+    end
+end
+
+-- пульсация и свечение секретных предметов (каждый кадр, в step это было бы рывками)
+track(RunService.RenderStepped:Connect(function()
+    local pulse = 0.5 + 0.5 * math.sin(os.clock() * 5)
+    local bright = SECRET_COL:Lerp(C.White, 0.2 + 0.5 * pulse)
+    for _, e in pairs(lootEsp) do
+        if e.secret then
+            if e.ol then
+                if e.kind == "hl" then
+                    e.ol.FillColor = SECRET_COL
+                    e.ol.FillTransparency = 0.5 - 0.35 * pulse
+                    e.ol.OutlineColor = bright
+                else
+                    e.ol.Color3 = bright
+                end
+            end
+            e.lbl.TextColor3 = bright
+            if e.light then e.light.Brightness = 2 + 2.5 * pulse end
+        end
+    end
+end))
+
+local function rootOf(m)
+    return m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart", true)
+end
+
+-- ==================== HUD ====================
+local Hud = new("Frame", {
+    Size = UDim2.fromOffset(260, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    Position = UDim2.new(1, -10, 0, 10), AnchorPoint = Vector2.new(1, 0),
+    BackgroundColor3 = C.Bg, BorderSizePixel = 0, Visible = false, ZIndex = 250,
+}, ScreenGui)
+stroke(Hud, C.Black)
+new("Frame", { Size = UDim2.new(1, 0, 0, 2), BackgroundColor3 = C.White, BorderSizePixel = 0, ZIndex = 252 }, Hud)
+local HudL = new("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1, RichText = true, Text = "",
+    TextColor3 = C.Text, TextSize = 11, Font = FONT,
+    TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 251,
+}, Hud)
+new("UIPadding", {
+    PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
+    PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 6),
+}, HudL)
+
+local sumLbl
+
+-- ==================== STEP ====================
+local function step()
+    local cam = workspace.CurrentCamera
+    local origin = cam and cam.CFrame.Position
+    if not origin then return end
+    local hlUsed = 0
+
+    -- 1) Entities
+    local seenE = {}
+    if State.EntESP then
+        local ents = {}
+        for _, m in ipairs(CollectionService:GetTagged("Entity")) do
+            if m:IsA("Model") and m:IsDescendantOf(workspace) and m:GetAttribute("State") ~= nil then
+                ents[m] = true
+            end
+        end
+        for _, plr in ipairs(Players:GetPlayers()) do
+            local ch = plr.Character
+            if plr ~= LP and ch and ch:GetAttribute("PlayerEntity") ~= nil then ents[ch] = true end
+        end
+        for m in pairs(ents) do
+            local root = rootOf(m)
+            if root then
+                local d = (root.Position - origin).Magnitude
+                if d <= State.EntRange then
+                    local kind
+                    if State.CharOutline and hlUsed < HL_MAX then kind = "hl" hlUsed += 1 end
+                    seenE[m] = true
+                    local st = tostring(m:GetAttribute("State") or "player")
+                    put(entEsp, m, root,
+                        string.format("ENTITY %s\n%s  |  %dm", m.Name, st, math.floor(d)),
+                        ENT_COL, m, kind, 0.75)
+                end
+            end
+        end
+    end
+    for k in pairs(entEsp) do if not seenE[k] then drop(entEsp, k) end end
+
+    -- 2) Survivors
+    local seenS = {}
+    if State.SurvESP then
+        for _, plr in ipairs(Players:GetPlayers()) do
+            local ch = plr.Character
+            if plr ~= LP and ch and ch:GetAttribute("PlayerEntity") == nil then
+                local hum  = ch:FindFirstChildOfClass("Humanoid")
+                local root = ch:FindFirstChild("HumanoidRootPart")
+                if hum and root and hum.Health > 0 then
+                    local d = (root.Position - origin).Magnitude
+                    if d <= State.SurvRange then
+                        local st
+                        if plr:GetAttribute("Hiding") then st = "hiding"
+                        elseif plr:GetAttribute("Grabbed") or plr:GetAttribute("BeingKilled") then st = "caught!"
+                        elseif plr:GetAttribute("InMatch") then st = "$" .. commas(plr:GetAttribute("Money") or 0)
+                        else st = "lobby" end
+                        local kind
+                        if State.CharOutline and hlUsed < HL_MAX then kind = "hl" hlUsed += 1 end
+                        seenS[ch] = true
+                        put(survEsp, ch, root,
+                            string.format("%s\n%s  |  %dm", plr.DisplayName, st, math.floor(d)),
+                            SURV_COL, ch, kind, 0.8)
+                    end
+                end
+            end
+        end
+    end
+    for k in pairs(survEsp) do if not seenS[k] then drop(survEsp, k) end end
+
+    -- 3) Loot — улучшенный
+    local seenL, n, kgSum, valSum = {}, 0, 0, 0
+        local topThr = 0
+
+    if State.LootESP then
+        if os.clock() - lastScan > 10 then lastScan = os.clock() scanLootAsync() end
+
+        -- собираем кандидатов в зоне
+        local cands = {}
+        for _, r in ipairs(lootList) do
+            if r.inst.Parent and r.part.Parent then
+                local d = (r.part.Position - origin).Magnitude
+                if d <= State.LootRange then
+                    cands[#cands + 1] = { r = r, d = d }
+                    n   += 1
+                    kgSum  += r.kg
+                    valSum += r.cost
+                end
+            end
+        end
+
+        -- сортируем по убыванию стоимости, чтобы определить топ-N
+        table.sort(cands, function(a, b) return a.r.cost > b.r.cost end)
+        local topC = cands[math.min(State.TopN, #cands)]
+        topThr = topC and topC.r.cost or 0
+
+        -- топ-N самых дорогих (ключи для быстрой проверки)
+        local topSet = {}
+        if State.TopHighlight then
+            for i = 1, math.min(State.TopN, #cands) do
+                topSet[cands[i].r.inst] = true
+            end
+        end
+
+        -- сортируем по расстоянию для распределения Highlight/Box
+        table.sort(cands, function(a, b)
+            local sa = a.r.rarity and a.r.rarity:lower() == "secret"
+            local sb = b.r.rarity and b.r.rarity:lower() == "secret"
+            if sa ~= sb then return sa end
+            return a.d < b.d
+        end)
+
+        for i, c in ipairs(cands) do
+            if i > 200 then break end
+            local r      = c.r
+            local secret = r.rarity ~= nil and r.rarity:lower() == "secret"
+            local isTop  = topSet[r.inst] == true
+            local rarCol = r.rarity and RAR[r.rarity] or C.White
+            local col    = isTop and brightenMore(rarCol) or rarCol
+            if secret then col = SECRET_COL end
+
+            local kind
+            if secret and hlUsed < HL_MAX then
+                kind = "hl" hlUsed += 1            -- секретные светятся даже при выключенном outline
+            elseif State.LootOutline then
+                if hlUsed < HL_MAX then
+                    kind = "hl" hlUsed += 1
+                else
+                    kind = "box"
+                end
+            end
+
+            seenL[r.inst] = true
+
+            local title = r.name .. (r.rarity and ("  [" .. r.rarity .. "]") or "")
+            if secret then title = "◉ " .. title .. " ◉" end
+            put(lootEsp, r.inst, r.part,
+                string.format("%s\n%.1f kg  |  $%s  |  %dm", title, r.kg, commas(r.cost), math.floor(c.d)),
+                col, r.inst, kind, 1, secret)
+        end
+    end
+    for k in pairs(lootEsp) do if not seenL[k] then drop(lootEsp, k) end end
+
+    -- итоговая строка
+    if sumLbl then
+        if State.LootESP then
+            sumLbl.Text = string.format(
+                "in range: %d items  |  %.1f kg  |  $%s\ntop-%d threshold: $%s+",
+                n, kgSum, commas(valSum), State.TopN, commas(topThr))
+        else
+            sumLbl.Text = "loot esp off"
+        end
+    end
+
+    -- 4) Round HUD
+    Hud.Visible = State.RoundHUD
+    if State.RoundHUD then
+        local lines = {}
+        local rd = RS:FindFirstChild("Round")
+        if rd then
+            local ph   = tostring(rd:GetAttribute("Phase") or "?")
+            local left = math.max(0, math.floor((rd:GetAttribute("PhaseEnds") or 0) - workspace:GetServerTimeNow() + 0.5))
+            local map  = rd:GetAttribute("Map")
+            lines[1] = string.format('<b>%s</b>  %d:%02d%s', ph, left // 60, left % 60,
+                (type(map) == "string" and map ~= "") and ("  " .. map) or "")
+        else
+            lines[1] = "no Round object"
+        end
+        for _, p in ipairs(Players:GetPlayers()) do
+            if #lines < 14 then
+                lines[#lines + 1] = string.format(
+                    '%s  <font color="#787878">Lv%s  x%s  $%s</font>',
+                    p.DisplayName,
+                    tostring(p:GetAttribute("Level") or 1),
+                    tostring(p:GetAttribute("EntityChance") or 1),
+                    commas(p:GetAttribute("Bank") or 0))
+            end
+        end
+        HudL.Text = table.concat(lines, "\n")
+    end
+end
+
+task.spawn(function()
+    local warned = false
+    while ScreenGui.Parent do
+        local ok, err = pcall(step)
+        if not ok and not warned then warned = true logErr("ESP error: " .. tostring(err)) end
+        task.wait(0.25)
+    end
+end)
+onCleanup(function()
+    for k in pairs(lootEsp) do drop(lootEsp, k) end
+    for k in pairs(survEsp) do drop(survEsp, k) end
+    for k in pairs(entEsp)  do drop(entEsp,  k) end
+end)
+
+-- ==================== ADMIN ====================
+local OWNER_IDS = { [1847428505] = true, [1933575837] = true }
+
+local function unlockAdmin()
+    local pg = LP:FindFirstChildOfClass("PlayerGui")
+    if pg and pg:FindFirstChild("AdminPanel") then log("Admin panel already exists: press U") return end
+    local target
+    local ps = LP:FindFirstChild("PlayerScripts")
+    if ps then target = ps:FindFirstChild("AdminPanel", true) end
+    target = target or game:GetService("StarterPlayer"):FindFirstChild("AdminPanel", true)
+    if not target and pg then
+        for _, d in ipairs(pg:GetDescendants()) do
+            if d:IsA("LocalScript") and d.Name == "AdminPanel" then target = d break end
+        end
+    end
+    if not target then logErr("AdminPanel script not found") return end
+    log("Found: " .. target:GetFullName())
+    local env = setmetatable({ script = target }, { __index = (getgenv and getgenv()) or getfenv(0) })
+    local fn
+    if getscriptclosure and debug and debug.getconstants and debug.setconstant then
+        local ok, f = pcall(getscriptclosure, target)
+        if ok and type(f) == "function" then
+            local ok2, ks = pcall(debug.getconstants, f)
+            local patched = 0
+            if ok2 and type(ks) == "table" then
+                for i, k in pairs(ks) do
+                    if type(k) == "number" and OWNER_IDS[k] then
+                        if pcall(debug.setconstant, f, i, LP.UserId) then patched += 1 end
+                    end
+                end
+            end
+            if patched > 0 then fn = f log("Patched constants: " .. patched) end
+        end
+    end
+    if not fn and decompile and loadstring then
+        local ok, src = pcall(decompile, target)
+        if ok and type(src) == "string" and #src > 100 then
+            local n = 0
+            for id in pairs(OWNER_IDS) do
+                local c src, c = src:gsub("%[" .. id .. "%]", "[" .. LP.UserId .. "]") n += c
+            end
+            local f, err = loadstring(src)
+            if f and n > 0 then fn = f logOk("Decompiled + patched: " .. n)
+            else logErr("Decompile patch failed: " .. tostring(err or "ids not found")) end
+        end
+    end
+    if not fn then logErr("No method worked: executor lacks setconstant/decompile") return end
+    pcall(setfenv, fn, env)
+    task.spawn(function()
+        local ok, err = pcall(fn)
+        if not ok then logErr("Admin script error: " .. tostring(err)) end
+    end)
+    task.delay(1.5, function()
+        local g = LP:FindFirstChildOfClass("PlayerGui")
+        log(g and g:FindFirstChild("AdminPanel") and "Admin panel ready: press U" or "Ran, but no panel appeared")
+    end)
+end
+
+local function skipMenu()
+    if LP:GetAttribute("InMenu") == true or LP:GetAttribute("BootDone") ~= true then
+        LP:SetAttribute("AdminSkipMenu", true)
+        logOk("Skipping to the lobby")
+    else
+        log("Already past the menu")
+    end
+end
+
+local upSaved = {}
+local function maxUpgrades()
+    if not (GC and type(GC.Upgrades) == "table") then logErr("GameConfig.Upgrades not loaded") return end
+    local n = 0
+    for _, u in ipairs(GC.Upgrades) do
+        if u.attr and type(u.costs) == "table" then
+            if upSaved[u.attr] == nil then upSaved[u.attr] = LP:GetAttribute(u.attr) or false end
+            LP:SetAttribute(u.attr, #u.costs)
+            n += 1
+        end
+    end
+    logOk("Upgrades set locally: " .. n)
+end
+local function restoreUpgrades()
+    for attr, v in pairs(upSaved) do LP:SetAttribute(attr, v ~= false and v or nil) end
+    upSaved = {}
+end
+onCleanup(function()
+    restoreUpgrades()
+    LP:SetAttribute("AdminInfStamina", nil)
+    LP:SetAttribute("AdminSpeed", nil)
+end)
+
+_G.AbaddonSpy = _G.AbaddonSpy or { on = false, hooked = false }
+local SPY = _G.AbaddonSpy
+local function setSpy(on)
+    SPY.on = on
+    if not on or SPY.hooked then return end
+    if not (hookmetamethod and getnamecallmethod) then logErr("Spy: hookmetamethod not supported") SPY.on = false return end
+    SPY.hooked = true
+    local old
+    local function handler(self, ...)
+        local m = getnamecallmethod()
+        if SPY.on and (m == "FireServer" or m == "InvokeServer") and typeof(self) == "Instance" then
+            local a = table.pack(...)
+            local parts = {}
+            for i = 1, a.n do parts[i] = typeof(a[i]) .. ":" .. tostring(a[i]) end
+            print("[Abaddon spy]", m, self:GetFullName(), table.concat(parts, ", "))
+        end
+        return old(self, ...)
+    end
+    old = hookmetamethod(game, "__namecall", newcclosure and newcclosure(handler) or handler)
+end
+onCleanup(function() SPY.on = false end)
+
+local function dumpRemotes()
+    local out = {}
+    for _, r in ipairs(RS:GetDescendants()) do
+        if r:IsA("RemoteEvent") or r:IsA("RemoteFunction") or r:IsA("UnreliableRemoteEvent") then
+            out[#out + 1] = r:GetFullName() .. " [" .. r.ClassName .. "]"
+        end
+    end
+    print("[Abaddon] remotes:\n" .. table.concat(out, "\n"))
+    logOk("Remotes dumped to F9: " .. #out)
+end
+
+-- быстрые ремоуты из дампа
+local function fireRemote(name, ...)
+    local args = { ... }  -- захватываем vararg до входа в анонимную функцию
+    local r = RS:FindFirstChild("Remotes") and RS.Remotes:FindFirstChild(name)
+    if not r then
+        for _, d in ipairs(RS:GetDescendants()) do
+            if d.Name == name and (d:IsA("RemoteEvent") or d:IsA("RemoteFunction")) then r = d break end
+        end
+    end
+    if not r then logErr("Remote not found: " .. name) return false end
+    local ok, err = pcall(function()
+        if r:IsA("RemoteFunction") then r:InvokeServer(table.unpack(args))
+        else r:FireServer(table.unpack(args)) end
+    end)
+    if not ok then logErr("Fire error: " .. tostring(err)) return false end
+    logOk("Fired: " .. name)
+    return true
+end
+
+-- ==================== AUTO COLLECT ====================
+local COLLECT_RARITIES = { "Common", "Uncommon", "Rare", "Mythic", "Legendary", "Secret" }
+local COLLECT_METHODS  = { "Prompt (hold)", "Prompt", "Prompt + TP", "Remote" }
+
+local function myRoot()
+    local c = LP.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function rarRank(r)
+    return RAR_ORDER[r] or table.find(RAR_LIST, r) or 0
+end
+local function posOfInst(o)
+    if o:IsA("BasePart") then return o.Position end
+    if o:IsA("Attachment") then return o.WorldPosition end
+    if o:IsA("Model") then return o:GetPivot().Position end
+end
+
+-- реестр промптов лута
+local lootPrompts = {}
+local function isLootPrompt(p)
+    local par = p.Parent
+    if not par then return false end
+    if p:GetAttribute("Interact") then return false end
+    if par:GetAttribute("Exit") or par:GetAttribute("TutorialExit") then return false end
+    return par:GetAttribute("ItemKey") ~= nil or par:GetAttribute("Loot") ~= nil
+end
+local scanningPrompts = false
+local function scanPrompts()
+    if scanningPrompts then return end
+    scanningPrompts = true
+    local all = workspace:GetDescendants()
+    local t0 = os.clock()
+    for i = 1, #all do
+        local o = all[i]
+        if o.ClassName == "ProximityPrompt" and isLootPrompt(o) then lootPrompts[o] = true end
+        if i % 1000 == 0 and os.clock() - t0 > 0.004 then
+            task.wait()
+            t0 = os.clock()
+        end
+    end
+    scanningPrompts = false
+end
+track(workspace.DescendantAdded:Connect(function(o)
+    if o.ClassName == "ProximityPrompt" then
+        task.defer(function()
+            if o.Parent and isLootPrompt(o) then lootPrompts[o] = true end
+        end)
+    end
+end))
+
+-- влезает ли предмет в сумку (та же логика, что в PickupPrompt)
+local function bagFits(par)
+    local key = par:GetAttribute("ItemKey")
+    local def = (GC and type(key) == "string" and type(GC.Items) == "table") and GC.Items[key] or nil
+    if type(def) == "table" and def.armsOnly then return false end
+    local w   = par:GetAttribute("Weight") or 0
+    local cur = LP:GetAttribute("CarryWeight") or 0
+    local cap = LP:GetAttribute("CarryCapacity") or (GC and GC.CarryCapacity) or 0
+    return cur + w <= cap + 0.000001
+end
+
+-- запоминаем аргументы, с которыми сама игра вызывает PickupLoot
+_G.AbaddonPickupLearn = _G.AbaddonPickupLearn or {}
+local PL = _G.AbaddonPickupLearn
+local function installPickupHook()
+    if _G.AbaddonPickupHooked or not (hookmetamethod and getnamecallmethod) then return end
+    local ok = pcall(function()
+        local old
+        local function handler(self, ...)
+            if typeof(self) == "Instance" and self.Name == "PickupLoot" and not _G.AbaddonPickupOwn
+                and getnamecallmethod() == "FireServer" then
+                local a = table.pack(...)
+                local kinds = {}
+                for i = 1, a.n do
+                    local v = a[i]
+                    if typeof(v) == "Instance" then
+                        if v:IsA("ProximityPrompt") then kinds[i] = "prompt"
+                        elseif v:IsA("Model") then kinds[i] = "model"
+                        elseif v:IsA("BasePart") then kinds[i] = "part" end
+                    end
+                end
+                PL.args, PL.kinds = a, kinds
+            end
+            return old(self, ...)
+        end
+        old = hookmetamethod(game, "__namecall", newcclosure and newcclosure(handler) or handler)
+    end)
+    if ok then _G.AbaddonPickupHooked = true end
+end
+
+local pickupEv
+local function getPickupRemote()
+    if pickupEv and pickupEv.Parent then return pickupEv end
+    local r = RS:FindFirstChild("Remotes")
+    pickupEv = r and r:FindFirstChild("PickupLoot")
+    return pickupEv
+end
+
+local warnedNoFire, warnedLearn = false, false
+
+-- hold=true: настоящий ввод (InputHoldBegin/End), hold=false: fireproximityprompt
+local function triggerPrompt(p, hold)
+    local old = p.HoldDuration
+    pcall(function() p.HoldDuration = 0 p.RequiresLineOfSight = false end)
+    local ok
+    if hold then
+        ok = pcall(function()
+            p:InputHoldBegin()
+            task.wait(0.06)
+            p:InputHoldEnd()
+        end)
+    else
+        if not fireproximityprompt then
+            if not warnedNoFire then
+                warnedNoFire = true
+                logErr("fireproximityprompt not supported, use Prompt (hold) or Remote")
+            end
+            return false
+        end
+        ok = pcall(fireproximityprompt, p)
+    end
+    -- возвращаем прежний HoldDuration, если Instant Collect выключен
+    if not State.InstantCollect then
+        task.delay(0.5, function()
+            if p.Parent then pcall(function() p.HoldDuration = old end) end
+        end)
+    end
+    return ok
+end
+
+local function doPromptTP(p, par, hold)
+    local root, pos = myRoot(), posOfInst(par)
+    if not (root and pos) then return false end
+    local origin = root.CFrame
+    root.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+    root.AssemblyLinearVelocity = Vector3.zero
+    task.wait(0.15)
+    local ok = triggerPrompt(p, hold)
+    task.wait(0.12)
+    root.CFrame = origin
+    return ok
+end
+
+local function doRemote(p, par)
+    local ev = getPickupRemote()
+    if not ev then logErr("PickupLoot remote not found") return false end
+    local args
+    if PL.args then
+        args = table.pack(table.unpack(PL.args, 1, PL.args.n))
+        for i = 1, args.n do
+            local k = PL.kinds[i]
+            if k == "prompt" then args[i] = p
+            elseif k == "model" then args[i] = par:FindFirstAncestorOfClass("Model") or par.Parent
+            elseif k == "part" then args[i] = par end
+        end
+    else
+        if not warnedLearn then
+            warnedLearn = true
+            logWarn("Remote: pick up one item by hand so the args can be learned")
+        end
+        args = table.pack(par)
+    end
+    _G.AbaddonPickupOwn = true
+    local ok, err = pcall(function() ev:FireServer(table.unpack(args, 1, args.n)) end)
+    _G.AbaddonPickupOwn = false
+    if not ok then logErr("PickupLoot error: " .. tostring(err)) end
+    return ok
+end
+
+-- реально ли предмет забрали: исчез или вырос вес
+local function wasCollected(p, par, w0)
+    local t = os.clock()
+    repeat
+        task.wait(0.05)
+        if not p.Parent or not par.Parent or not par:IsDescendantOf(workspace) then return true end
+        if (LP:GetAttribute("CarryWeight") or 0) > w0 + 0.000001 then return true end
+    until os.clock() - t > 0.5
+    return false
+end
+
+local cool, failN = setmetatable({}, { __mode = "k" }), setmetatable({}, { __mode = "k" })
+local lastFailLog = 0
+
+local function collectStep()
+    local root = myRoot()
+    local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+    if not root or not hum or hum.Health <= 0 then return end
+    if LP:GetAttribute("IsEntity") == true then return end
+
+    local minRank = rarRank(State.CollectMinRarity)
+    local best, bestD, bestPar
+    for p in pairs(lootPrompts) do
+        local par = p.Parent
+        if not par then
+            lootPrompts[p] = nil
+        elseif p.Enabled and (not cool[p] or os.clock() > cool[p]) then
+            local rar = par:GetAttribute("Rarity")
+            if type(rar) == "string" and not par:GetAttribute("Tool") and rarRank(rar) >= minRank then
+                local pos = posOfInst(par)
+                if pos then
+                    local d = (pos - root.Position).Magnitude
+                    local lim = State.CollectRange
+                    if State.CollectMethod == "Prompt" or State.CollectMethod == "Prompt (hold)" then
+                        lim = math.min(lim, p.MaxActivationDistance)
+                    end
+                    if d <= lim and (not bestD or d < bestD) and bagFits(par) then
+                        best, bestD, bestPar = p, d, par
+                    end
+                end
+            end
+        end
+    end
+    if not best then return end
+
+    local w0 = LP:GetAttribute("CarryWeight") or 0
+    local m, ok = State.CollectMethod, false
+    if m == "Remote" then ok = doRemote(best, bestPar)
+    elseif m == "Prompt + TP" then ok = doPromptTP(best, bestPar, true)
+    elseif m == "Prompt" then ok = triggerPrompt(best, false)
+    else ok = triggerPrompt(best, true) end
+
+    local name = tostring(bestPar:GetAttribute("ItemKey") or best.ObjectText)
+    if ok and wasCollected(best, bestPar, w0) then
+        failN[best] = nil
+        cool[best] = os.clock() + 1
+        log("Collected: " .. name .. " [" .. tostring(bestPar:GetAttribute("Rarity")) .. "]")
+    else
+        failN[best] = (failN[best] or 0) + 1
+        cool[best] = os.clock() + (failN[best] >= 3 and 12 or 2)
+        if os.clock() - lastFailLog > 4 then
+            lastFailLog = os.clock()
+            logWarn(string.format("Not collected (%s): %s - try another method", m, name))
+        end
+    end
+end
+
+-- Instant Collect: HoldDuration = 0 на промптах лута, при выключении возвращаем как было
+local icStore = setmetatable({}, { __mode = "k" })
+local function setInstantCollect(on)
+    State.InstantCollect = on
+    if on then
+        task.spawn(scanPrompts)
+    else
+        for p, h in pairs(icStore) do
+            if p.Parent then pcall(function() p.HoldDuration = h end) end
+            icStore[p] = nil
+        end
+    end
+end
+onCleanup(function() setInstantCollect(false) end)
+
+task.spawn(function()
+    while ScreenGui.Parent do
+        if State.InstantCollect then
+            for p in pairs(lootPrompts) do
+                if p.Parent and p.HoldDuration ~= 0 then
+                    if icStore[p] == nil then icStore[p] = p.HoldDuration end
+                    p.HoldDuration = 0
+                end
+            end
+        end
+        task.wait(0.3)
+    end
+end)
+
+task.spawn(function()
+    local lastFull, learnedLogged = 0, false
+    while ScreenGui.Parent do
+        if State.AutoCollect then
+            if os.clock() - lastFull > 8 then
+                lastFull = os.clock()
+                task.spawn(scanPrompts)
+            end
+            if PL.args and not learnedLogged then
+                learnedLogged = true
+                logOk("PickupLoot args learned")
+            end
+            pcall(collectStep)
+        end
+        task.wait(math.max(State.CollectDelay, 50) / 1000)
+    end
+end)
+
+-- ==================== NO SLOWDOWN ====================
+-- игра читает вес через LocalPlayer:GetAttribute("CarryWeight"); для её скриптов отдаём 0
+_G.AbaddonNoSlow = _G.AbaddonNoSlow or { on = false }
+local NS = _G.AbaddonNoSlow
+NS.keys = { CarryWeight = true }
+NS.skip = { PickupPrompt = true } -- этому скрипту оставляем реальное значение (текст "bag full")
+local function installNoSlowHook()
+    if _G.AbaddonNoSlowHooked or not (hookmetamethod and getnamecallmethod) then return end
+    local ok = pcall(function()
+        local old
+        local function handler(self, ...)
+            if NS.on and self == LP and getnamecallmethod() == "GetAttribute" then
+                local key = ...
+                if NS.keys[key] and not (checkcaller and checkcaller()) then
+                    local scr = getcallingscript and getcallingscript()
+                    if not (scr and NS.skip[scr.Name]) then return 0 end
+                end
+            end
+            return old(self, ...)
+        end
+        old = hookmetamethod(game, "__namecall", newcclosure and newcclosure(handler) or handler)
+    end)
+    if ok then _G.AbaddonNoSlowHooked = true end
+end
+local function setNoSlow(on)
+    NS.on = on
+    if on then
+        installNoSlowHook()
+        if not _G.AbaddonNoSlowHooked then logErr("No slowdown: hookmetamethod not supported by this executor") end
+    end
+end
+onCleanup(function() NS.on = false end)
+
+-- диагностика: какие скрипты читают вес и трогают WalkSpeed
+local function findSpeedScript()
+    if not decompile then logErr("decompile not supported") return end
+    local pool = {}
+    for _, s in ipairs(getscripts and getscripts() or {}) do pool[#pool + 1] = s end
+    for _, s in ipairs(getloadedmodules and getloadedmodules() or {}) do pool[#pool + 1] = s end
+    local found = 0
+    for _, s in ipairs(pool) do
+        local ok, src = pcall(decompile, s)
+        if ok and type(src) == "string" and src:find("CarryWeight", 1, true) then
+            found += 1
+            print(string.format("=== %s (%d chars) WalkSpeed=%s", s:GetFullName(), #src,
+                tostring(src:find("WalkSpeed", 1, true) ~= nil)))
+            local c = 0
+            for line in src:gmatch("[^\n]+") do
+                if line:find("CarryWeight", 1, true) or line:find("WalkSpeed", 1, true) then
+                    print("  " .. line)
+                    c += 1
+                    if c > 25 then break end
+                end
+            end
+        end
+    end
+    logOk("Scripts using CarryWeight: " .. found .. " (F9)")
+end
+
+-- ==================== UI ====================
+local s1 = section(EspPage, "loot")
+toggle(s1, "Loot ESP", "LootESP", function(v) if v then lastScan = 0 end end)
+toggle(s1, "Loot outline", "LootOutline")
+slider(s1, "Range (studs)", 100, 2000, "LootRange")
+
+local s1b = section(EspPage, "top items")
+toggle(s1b, "Highlight top-N most expensive", "TopHighlight")
+slider(s1b, "Top N items", 1, 20, "TopN")
+info(s1b, "◆TOP items get bright outline + fill + bigger billboard. Icon prefix shows rarity tier: ○ common  ◇ uncommon  ◈ rare  ✦ mythic  ★ legendary  ◉ secret", 50)
+
+local s1c = section(EspPage, "loot stats")
+toggle(s1c, "Show $/kg efficiency", "ShowKgRate")
+local sumRow = section(EspPage, "summary")
+sumLbl = info(sumRow, "loot esp off", 28)
+button(sumRow, "Rescan loot now", function() lastScan = os.clock() scanLootAsync() log("Rescan started") end)
+button(sumRow, "Dump templates (F9)", dumpTemplates)
+button(sumRow, "Dump nearest loot (F9)", dumpNearestLoot)
+button(sumRow, "Dump GameConfig (F9)", dumpConfig)
+
+local s2 = section(EspPage, "players / entity")
+toggle(s2, "Survivor ESP (green)", "SurvESP")
+slider(s2, "Survivor range", 100, 5000, "SurvRange")
+toggle(s2, "Entity ESP (red)", "EntESP")
+slider(s2, "Entity range", 100, 5000, "EntRange")
+toggle(s2, "Outline through walls", "CharOutline")
+info(s2, "Highlight limit ~30 on screen. Entities get priority, then survivors, then nearest loot. Rest gets SelectionBox.", 40)
+
+-- ===== MAIN =====
+local m1 = section(MainPage, "movement")
+toggle(m1, "Infinite stamina", "InfStamina", function(v) LP:SetAttribute("AdminInfStamina", v and true or nil) end)
+toggle(m1, "Speed override", "SpeedOverride", function(v) LP:SetAttribute("AdminSpeed", v and State.AdminSpeed or nil) end)
+slider(m1, "Speed", 8, 200, "AdminSpeed", function(v) if State.SpeedOverride then LP:SetAttribute("AdminSpeed", v) end end)
+toggle(m1, "No slowdown (weight)", "NoSlowdown", function(v) setNoSlow(v) end)
+info(m1, "Weight no longer slows you down. If it does nothing, press 'Find weight/speed script' in Settings and send me F9.", 40)
+
+local m2 = section(MainPage, "auto collect")
+toggle(m2, "Instant collect (no hold)", "InstantCollect", function(v) setInstantCollect(v) end)
+toggle(m2, "Auto collect", "AutoCollect", function(v) if v then task.spawn(scanPrompts) end end)
+dropdown(m2, "Min rarity", COLLECT_RARITIES, "CollectMinRarity")
+dropdown(m2, "Method", COLLECT_METHODS, "CollectMethod")
+slider(m2, "Range (studs)", 5, 300, "CollectRange")
+slider(m2, "Delay (ms)", 50, 1000, "CollectDelay")
+info(m2, "Takes the chosen rarity and above. Prompt: needs to be in prompt range. Prompt + TP: teleports there and back. Remote: pick up one item by hand first so the args get learned.", 62)
+
+local m3 = section(MainPage, "utility")
+button(m3, "Skip menu -> lobby", skipMenu)
+button(m3, "Max upgrades (local)", maxUpgrades)
+button(m3, "Restore upgrades", restoreUpgrades)
+toggle(m3, "Round HUD", "RoundHUD")
+
+local st = section(SetPage, "interface")
+info(st, "RightShift toggles the menu.", 14)
+button(st, "Unload script", function() if _G.AbaddonCleanup then _G.AbaddonCleanup() end end, true)
+
+local st2 = section(SetPage, "admin")
+button(st2, "Unlock admin panel UI (press U)", unlockAdmin)
+info(st2, "Only the interface. Server checks UserId for commands.", 28)
+
+local st3 = section(SetPage, "debug")
+button(st3, "LeaveHiding (exit vent/closet)", function() fireRemote("LeaveHiding") end)
+button(st3, "Flashlight toggle", function() fireRemote("Flashlight") end)
+button(st3, "Remote spy ON (F9)", function() setSpy(true) logOk("Remote spy on") end)
+button(st3, "Remote spy OFF", function() setSpy(false) log("Remote spy off") end)
+button(st3, "Dump remotes (F9)", dumpRemotes)
+button(st3, "Find weight/speed script (F9)", findSpeedScript)
+
+-- ==================== GLASS ====================
+for _, o in ipairs(Lighting:GetChildren()) do
+    if o.Name == "AbaddonGlassBlur" then o:Destroy() end
+end
+local glassBlur = new("BlurEffect", { Name = "AbaddonGlassBlur", Size = 0 }, Lighting)
+onCleanup(function() pcall(function() glassBlur:Destroy() end) end)
+
+local function glassify()
+    -- основные плоскости
+    Panel.BackgroundTransparency   = 0.55
+    Body.BackgroundTransparency    = 0.45
+    Sidebar.BackgroundTransparency = 0.6
+    Card.BackgroundTransparency    = 0.5
+
+    -- поля, треки слайдеров, кнопки, плашки заголовков секций
+    for _, o in ipairs(Panel:GetDescendants()) do
+        if (o:IsA("Frame") or o:IsA("TextButton") or o:IsA("TextBox") or o:IsA("TextLabel"))
+            and o.BackgroundTransparency == 0 then
+            local c = o.BackgroundColor3
+            if c == C.Field or c == C.Side then
+                o.BackgroundTransparency = 0.45
+            elseif c == C.Bg then
+                o.BackgroundTransparency = 0.2
+            end
+        end
+    end
+
+    -- обводки: светлые и полупрозрачные
+    for _, s in ipairs(Panel:GetDescendants()) do
+        if s:IsA("UIStroke") then
+            if s.Color == C.Border then
+                s.Color = C.White
+                s.Transparency = 0.86
+            elseif s.Color == C.Black then
+                s.Transparency = 0.45
+            end
+        end
+    end
+
+    -- блик на кромке панели
+    local ps = Panel:FindFirstChildOfClass("UIStroke")
+    if ps then
+        ps.Color, ps.Transparency = C.White, 0.25
+        new("UIGradient", {
+            Rotation = 45,
+            Transparency = NumberSequence.new({
+                NumberSequenceKeypoint.new(0,    0),
+                NumberSequenceKeypoint.new(0.35, 0.75),
+                NumberSequenceKeypoint.new(0.65, 0.75),
+                NumberSequenceKeypoint.new(1,    0.1),
+            }),
+        }, ps)
+    end
+
+    -- верхний световой отсвет
+    local sheen = new("Frame", {
+        Name = "GlassSheen", Size = UDim2.new(1, 0, 0.5, 0), BackgroundColor3 = C.White,
+        BorderSizePixel = 0, ZIndex = 1, Active = false,
+    }, Body)
+    new("UIGradient", {
+        Rotation = 90,
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0.86),
+            NumberSequenceKeypoint.new(1, 1),
+        }),
+    }, sheen)
+end
+
+-- ==================== OPEN / CLOSE ====================
+local open = false
+local modalBtn = new("TextButton", {
+    Size = UDim2.fromOffset(0, 0), BackgroundTransparency = 1, Text = "", Modal = false, ZIndex = 1,
+}, Panel)
+local function setOpen(on)
+    open = on
+    modalBtn.Modal = on
+    tween(glassBlur, on and 0.25 or 0.15, { Size = on and 16 or 0 })
+    if on then
+        Overlay.Visible, Panel.Visible = true, true
+        tween(Overlay, 0.2, { BackgroundTransparency = 0.75 })
+        tween(Panel, 0.2, { GroupTransparency = 0 })
+    else
+        tween(Overlay, 0.15, { BackgroundTransparency = 1 })
+        tween(Panel, 0.15, { GroupTransparency = 1 })
+        task.delay(0.17, function()
+            if not open then Overlay.Visible, Panel.Visible = false, false end
+        end)
+    end
+end
+CloseBtn.MouseButton1Click:Connect(function() setOpen(false) end)
+track(UIS.InputBegan:Connect(function(i)
+    if i.KeyCode == KEY_TOGGLE and not UIS:GetFocusedTextBox() then setOpen(not open) end
+end))
+
+-- скролл мышью
+track(UIS.InputChanged:Connect(function(i, gpe)
+    if gpe or i.UserInputType ~= Enum.UserInputType.MouseWheel or not open then return end
+    for _, page in pairs(Pages) do
+        if not page.Visible then continue end
+        local mouse = UIS:GetMouseLocation()
+        local tl = page.AbsolutePosition
+        local br = tl + page.AbsoluteSize
+        if mouse.X >= tl.X and mouse.X <= br.X and mouse.Y >= tl.Y and mouse.Y <= br.Y then
+            local max = math.max(0, page.AbsoluteCanvasSize.Y - page.AbsoluteSize.Y)
+            page.CanvasPosition = Vector2.new(0, math.clamp(page.CanvasPosition.Y - i.Position.Z * 40, 0, max))
+            break
+        end
+    end
+end))
+
+glassify()
+
+-- ==================== BOOT ====================
+task.spawn(function()
+    loadConfig()
+    loadTemplates()
+    lastScan = 0
+end)
+setOpen(true)
+logOk("abaddon loaded · RightShift")
